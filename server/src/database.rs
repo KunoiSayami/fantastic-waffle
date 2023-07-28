@@ -1,7 +1,10 @@
 pub mod v1 {
+    use format_sql_query::QuotedData;
+    use futures::executor::Enter;
     use publib::types::FileEntry;
     use publib::PATH_UTF8_ERROR;
     use sqlx::{Result, SqliteConnection};
+    use std::fmt::Display;
     use std::path::Path;
 
     pub const VERSION: &str = "1";
@@ -34,12 +37,17 @@ pub mod v1 {
         .await
     }
 
-    // TODO
     pub async fn query_by_path(
         conn: &mut SqliteConnection,
         path: String,
     ) -> Result<Vec<FileEntry>> {
-        Ok(vec![])
+        let quoted = insert_percent(path);
+        sqlx::query_as::<_, FileEntry>(&format!(
+            r#"SELECT * FROM "files" WHERE "path" LIKE {}"#,
+            quoted
+        ))
+        .fetch_all(conn)
+        .await
     }
 
     pub async fn query(conn: &mut SqliteConnection, path: String) -> Result<Option<FileEntry>> {
@@ -83,6 +91,25 @@ pub mod v1 {
         Ok(())
     }
 
+    pub async fn delete(conn: &mut SqliteConnection, path: String) -> Result<()> {
+        let p: &Path = path.as_ref();
+        if p.is_dir() {
+            let quoted = insert_percent(path);
+            sqlx::query(&format!(
+                r#"DELETE FROM "files" WHERE "path" LIKE {}"#,
+                quoted
+            ))
+            .execute(conn)
+            .await?;
+        } else {
+            sqlx::query(r#"DELETE FROM "files" WHERE "path" = ?"#)
+                .bind(path)
+                .execute(conn)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn insert(conn: &mut SqliteConnection, entry: FileEntry) -> Result<()> {
         if entry.is_dir() {
             sqlx::query(r#"INSERT INTO "files" ("path", "is_dir") VALUES (?, ?)"#)
@@ -102,6 +129,18 @@ pub mod v1 {
                 .await?;
         }
         Ok(())
+    }
+
+    pub fn insert_percent(s: String) -> String {
+        let mut quoted = QuotedData(&if s.ends_with('/') {
+            s
+        } else {
+            format!("{}/", s)
+        })
+        .to_string();
+        debug_assert!(quoted.ends_with("'"));
+        quoted.insert(quoted.len() - 1, '%');
+        quoted
     }
 }
 

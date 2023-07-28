@@ -5,16 +5,23 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.72"
+async-walkdir = "0.2.0"
 axum = "0.6.19"
 axum-auth = "0.4.0"
+axum-server = { version = "0.5.1", features = ["tokio-rustls"] }
 clap = { version = "4.3.17", features = ["cargo"] }
 env_logger = { version = "0.10.0", features = ["auto-color"] }
+format-sql-query = "0.4.0"
+futures = { version = "0.3.28", features = ["unstable"] }
+futures-core = { version = "0.3.28", features = ["unstable"] }
 heapless = "0.7.16"
+http = "0.2.9"
 hyper = { version = "0.14.27", features = ["http2"] }
 kstool = { version = "0.2.1", features = ["sqlx"] }
 log = "0.4.19"
 notify = "6.0.1"
 notify-debouncer-full = { version = "*", default-features = false }
+oneshot = "0.1.5"
 publib = { path = "../publib" }
 rand = "0.8.5"
 serde = "1.0.171"
@@ -22,7 +29,8 @@ serde_derive = "1.0.171"
 serde_json = "1.0.103"
 sha2 = "0.10.7"
 sqlx = { version = "0.7.1", features = ["runtime-tokio-rustls", "sqlite"] }
+tap = "1.0.1"
 tokio = { version = "1.29.1", features = ["full"] }
 toml = "0.7.6"
 tower = "0.4.13"
-tower-http = { version = "0.4.2", features = ["trace"] }
+tower-http = { version = "0.4.2", features = ["trace", "auth"] }

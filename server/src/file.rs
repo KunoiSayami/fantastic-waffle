@@ -2,25 +2,30 @@ mod files {
     use super::FileEventHelper;
     use crate::database::current::{insert, mark, query_path, reset_all_mark, update};
     use crate::file::types::FileEvent;
-    use log::info;
-    use publib::file::{get_hash, iter_directory};
+    use anyhow::anyhow;
+    use async_walkdir::WalkDir;
+    use futures::StreamExt;
+    use log::{error, info};
+    use publib::file::get_hash;
     use publib::types::FileEntry;
     use sqlx::SqliteConnection;
-    use tokio::fs::DirEntry;
+    use std::path::{Path, PathBuf};
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
 
     pub async fn init_files(conn: &mut SqliteConnection, path: String) -> anyhow::Result<()> {
         reset_all_mark(conn).await?;
-        iter_directory(&path, async move |entry| {
+        let mut entries = WalkDir::new(path);
+        while let Some(Ok(entry)) = entries.next().await {
             process_file(conn, entry).await?;
-            Ok(())
-        })
-        .await?;
+        }
         Ok(())
     }
 
-    pub async fn process_file(conn: &mut SqliteConnection, entry: DirEntry) -> anyhow::Result<()> {
+    pub async fn process_file(
+        conn: &mut SqliteConnection,
+        entry: async_walkdir::DirEntry,
+    ) -> anyhow::Result<()> {
         match query_path(conn, entry.path()).await? {
             None => {
                 let hash = get_hash(entry.path()).await?.map(|x| format!("{}", x));
@@ -53,17 +58,60 @@ mod files {
     }
 
     impl FileDaemon {
-        pub async fn handler(
+        async fn event_handler(
+            conn: &mut SqliteConnection,
+            event: FileEvent,
+        ) -> anyhow::Result<()> {
+            match event {
+                FileEvent::New(ref paths) | FileEvent::Update(ref paths) => {
+                    let event_type = if let FileEvent::New(_) = event {
+                        "new"
+                    } else {
+                        "update"
+                    };
+                    for path in paths {
+                        let path: &Path = path.as_ref();
+                        let hash = get_hash(path)
+                            .await
+                            .map_err(|e| anyhow!("Get file hash error({}): {:?}", event_type, e))?;
+
+                        insert(
+                            conn,
+                            FileEntry::try_from_path(path, hash).map_err(|e| {
+                                anyhow!("Unable read metadata({}): {:?}", event_type, e)
+                            })?,
+                        )
+                        .await
+                        .map_err(|e| anyhow!("Unable insert file({}): {:?}", event_type, e))?;
+                    }
+                }
+
+                FileEvent::Remove(paths) => {
+                    for path in paths {
+                        let path: &Path = path.as_ref();
+                    }
+                }
+                _ => unreachable!(),
+            }
+            Ok(())
+        }
+
+        async fn handler(
             mut conn: SqliteConnection,
             mut receiver: mpsc::Receiver<FileEvent>,
         ) -> anyhow::Result<()> {
             while let Some(event) = receiver.recv().await {
                 match event {
-                    FileEvent::New(_) => {}
-                    FileEvent::Update(_) => {}
-                    FileEvent::Remove(_) => {}
+                    FileEvent::New(_) | FileEvent::Update(_) | FileEvent::Remove(_) => {
+                        Self::event_handler(&mut conn, event)
+                            .await
+                            .inspect_err(|e| error!("{}", e))
+                            .ok();
+                    }
                     FileEvent::Terminate => break,
-                    FileEvent::Unknown => {}
+                    FileEvent::Unknown => {
+                        unreachable!()
+                    }
                     FileEvent::Request(path, sender) => {}
                 }
             }
@@ -120,38 +168,94 @@ mod types {
     }
 
     impl FileEventHelper {
-        pub fn new() -> (Self, mpsc::Receiver<FileEvent>) {
+        pub(super) fn new() -> (Self, mpsc::Receiver<FileEvent>) {
             let (sender, receiver) = mpsc::channel(2048);
             (Self { upstream: sender }, receiver)
+        }
+
+        pub async fn send(&self, event: Event) -> Option<()> {
+            self.upstream.send(event.into()).await.ok()
         }
     }
 }
 
 mod watcher {
     use crate::file::types::FileEventHelper;
-    use notify::Event;
+    use log::{error, warn};
+    use notify::{Event, EventKind, RecursiveMode, Watcher};
     use std::path::Path;
     use std::thread::JoinHandle;
+    use tap::TapOptional;
 
     #[derive(Debug)]
     pub struct FileWatcher {
         handler: JoinHandle<Result<(), std::io::Error>>,
-        upstream: FileEventHelper,
+        exit_shot: oneshot::Sender<bool>,
     }
 
     impl FileWatcher {
-        pub fn watcher<P: AsRef<Path>>(path: P) -> Result<(), std::io::Error> {
+        pub fn watcher<P: AsRef<Path>>(
+            path: P,
+            exit_signal: oneshot::Receiver<bool>,
+            upstream: FileEventHelper,
+        ) -> Result<(), notify::Error> {
             let mut watcher = notify::recommended_watcher(move |res| match res {
                 Ok(event) => {}
                 Err(e) => {}
-            });
+            })?;
+            watcher
+                .watch(path.as_ref(), RecursiveMode::Recursive)
+                .inspect_err(|e| error!("[file watcher]Unable to watch directory: {:?}", e))?;
+            exit_signal
+                .recv()
+                .inspect_err(|e| {
+                    error!("[file watcher]Got error while poll oneshot event: {:?}", e)
+                })
+                .ok();
+            watcher
+                .unwatch(path.as_ref())
+                .inspect_err(|e| error!("[file watcher]Unable to unwatch directory: {:?}", e))?;
             Ok(())
         }
 
-        pub fn event_handler(event: Event) {
-            if event.kind.is_access() {
-                return;
+        pub fn event_handler(event: Event, upstream: FileEventHelper) {
+            match event.kind {
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(upstream.send(event))
+                        .tap_none(|| warn!("Unable send event to file daemon"));
+                }
+                _ => {}
             }
+        }
+
+        pub fn stop(self) -> Option<()> {
+            if !self.handler.is_finished() {
+                self.exit_shot
+                    .send(true)
+                    .inspect_err(|e| {
+                        error!(
+                            "[file watcher]Unable send terminate signal to file watcher thread: {:?}",
+                            e
+                        )
+                    })
+                    .ok()?;
+                std::thread::spawn(move || {
+                    for _ in 0..5 {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        if self.handler.is_finished() {
+                            break;
+                        }
+                    }
+                    if !self.handler.is_finished() {
+                        warn!("[file watcher]File watching not finished yet.");
+                    }
+                });
+            }
+            Some(())
         }
     }
 }
