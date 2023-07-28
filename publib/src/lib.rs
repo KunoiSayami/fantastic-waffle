@@ -1,4 +1,6 @@
 #![feature(async_closure)]
+#![feature(generators)]
+
 pub mod file;
 pub mod types;
 

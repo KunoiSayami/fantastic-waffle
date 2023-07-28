@@ -1,11 +1,12 @@
 mod file_entry {
     use crate::PATH_UTF8_ERROR;
+    use async_walkdir::DirEntry;
     use sqlx::sqlite::SqliteRow;
     use sqlx::{Error, FromRow, Row};
     use std::fmt::Display;
     #[cfg(target_os = "linux")]
     use std::os::unix::prelude::MetadataExt;
-    use tokio::fs::DirEntry;
+    use std::path::Path;
 
     #[derive(Clone, Debug)]
     pub struct FileEntry {
@@ -49,20 +50,6 @@ mod file_entry {
             }
         }
 
-        pub async fn try_from_entry<D: Display + std::default::Default>(
-            entry: DirEntry,
-            hash: Option<D>,
-        ) -> Result<Self, std::io::Error> {
-            let meta = entry.metadata().await?;
-            Ok(Self::new(
-                entry.path().to_str().expect(PATH_UTF8_ERROR).to_string(),
-                hash.unwrap_or_default(),
-                meta.mtime(),
-                meta.size() as i64,
-                meta.is_dir(),
-            ))
-        }
-
         pub fn check_hash_only(&self, other: &Self) -> bool {
             if self.is_dir {
                 return self.is_dir == other.is_dir;
@@ -87,10 +74,51 @@ mod file_entry {
             self.hash = hash.unwrap_or_default().to_string();
             self
         }
+
+        pub fn try_from_path<P: AsRef<Path> + Send + Sync, D: Display + Default>(
+            path: P,
+            hash: Option<D>,
+        ) -> Result<Self, std::io::Error> {
+            let meta = path.as_ref().metadata()?;
+            Ok(Self::from_metadata(path, meta, hash))
+        }
+
+        pub fn from_metadata<P: AsRef<Path>, D: Display + Default>(
+            path: P,
+            metadata: std::fs::Metadata,
+            hash: Option<D>,
+        ) -> Self {
+            Self::new(
+                path.as_ref().to_str().expect(PATH_UTF8_ERROR).to_string(),
+                hash.unwrap_or_default(),
+                metadata.mtime(),
+                metadata.size() as i64,
+                metadata.is_dir(),
+            )
+        }
+
+        pub async fn try_from_entry<D: Display + Default>(
+            entry: DirEntry,
+            hash: Option<D>,
+        ) -> Result<Self, std::io::Error> {
+            let meta = entry.metadata().await?;
+            Ok(Self::from_metadata(entry.path(), meta, hash))
+        }
+
+        pub fn into_tb_row(&self) -> String {
+            format!(
+                "<tb><tr>{}</tr><tr>{}</tr><tr>{}</tr><tr>{}</tr><tr>{}</tr></tb>",
+                self.path, self.hash, self.mtime, self.size, self.is_dir
+            )
+        }
+
+        pub const fn get_tb_title() -> &'static str {
+            "<tb><tr>Path</tr><tr>Hash</tr><tr>mtime</tr><tr>size</tr><tr>is_dir</tr></tb>"
+        }
     }
 
-    impl PartialEq<FileEntry> for FileEntry {
-        fn eq(&self, other: &FileEntry) -> bool {
+    impl PartialEq<Self> for FileEntry {
+        fn eq(&self, other: &Self) -> bool {
             if self.is_dir {
                 return self.is_dir == other.is_dir;
             }
