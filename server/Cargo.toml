@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.72"
+async-trait = "0.1.72"
 async-walkdir = "0.2.0"
 axum = "0.6.19"
 axum-auth = "0.4.0"

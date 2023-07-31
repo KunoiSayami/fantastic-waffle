@@ -585,6 +585,7 @@ name = "fantastic-waffle"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "async-walkdir",
  "axum",
  "axum-auth",
@@ -1566,6 +1567,7 @@ name = "publib"
 version = "0.0.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "async-walkdir",
  "serde",
  "serde_derive",

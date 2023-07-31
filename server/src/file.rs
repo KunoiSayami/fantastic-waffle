@@ -1,13 +1,14 @@
 mod files {
     use super::FileEventHelper;
-    use crate::database::current::{insert, mark, query_path, reset_all_mark, update};
+    use crate::database::current::{delete, insert, mark, query_path, reset_all_mark, update};
     use crate::file::types::FileEvent;
     use anyhow::anyhow;
     use async_walkdir::WalkDir;
     use futures::StreamExt;
     use log::{error, info};
     use publib::file::get_hash;
-    use publib::types::FileEntry;
+    use publib::types::{AsyncExitExt, FileEntry};
+    use publib::PATH_UTF8_ERROR;
     use sqlx::SqliteConnection;
     use std::path::{Path, PathBuf};
     use tokio::sync::mpsc;
@@ -89,6 +90,9 @@ mod files {
                 FileEvent::Remove(paths) => {
                     for path in paths {
                         let path: &Path = path.as_ref();
+                        delete(conn, path.to_str().expect(PATH_UTF8_ERROR).to_string())
+                            .await
+                            .map_err(|e| anyhow!("Unable delete path {:?}: {:?}", path, e))?;
                     }
                 }
                 _ => unreachable!(),
@@ -138,7 +142,7 @@ mod types {
         Update(Vec<String>),
         Remove(Vec<String>),
         /// Request files (from https)
-        Request(String, oneshot::Sender<Vec<FileEntry>>),
+        Request(Vec<String>, oneshot::Sender<Vec<FileEntry>>),
         Terminate,
         Unknown,
     }
@@ -176,6 +180,18 @@ mod types {
         pub async fn send(&self, event: Event) -> Option<()> {
             self.upstream.send(event.into()).await.ok()
         }
+
+        pub async fn send_request(
+            &self,
+            paths: Vec<String>,
+        ) -> Option<oneshot::Receiver<Vec<FileEntry>>> {
+            let (sender, receiver) = oneshot::channel();
+            self.upstream
+                .send(FileEvent::Request(paths, sender))
+                .await
+                .ok()?;
+            Some(receiver)
+        }
     }
 }
 
@@ -183,13 +199,14 @@ mod watcher {
     use crate::file::types::FileEventHelper;
     use log::{error, warn};
     use notify::{Event, EventKind, RecursiveMode, Watcher};
+    use publib::types::AsyncExitExt;
     use std::path::Path;
     use std::thread::JoinHandle;
     use tap::TapOptional;
 
     #[derive(Debug)]
     pub struct FileWatcher {
-        handler: JoinHandle<Result<(), std::io::Error>>,
+        handler: JoinHandle<Result<(), notify::Error>>,
         exit_shot: oneshot::Sender<bool>,
     }
 
@@ -232,32 +249,32 @@ mod watcher {
             }
         }
 
-        pub fn stop(self) -> Option<()> {
-            if !self.handler.is_finished() {
-                self.exit_shot
-                    .send(true)
-                    .inspect_err(|e| {
-                        error!(
-                            "[file watcher]Unable send terminate signal to file watcher thread: {:?}",
-                            e
-                        )
-                    })
-                    .ok()?;
-                std::thread::spawn(move || {
-                    for _ in 0..5 {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        if self.handler.is_finished() {
-                            break;
-                        }
-                    }
-                    if !self.handler.is_finished() {
-                        warn!("[file watcher]File watching not finished yet.");
-                    }
-                });
-            }
-            Some(())
+        pub fn start<P: AsRef<Path>>(path: P, event_helper: FileEventHelper) -> Self {
+            let (sender, receiver) = oneshot::channel();
+            let handler = std::thread::spawn(move || Self::watcher(path, receiver, event_helper));
+            Self::new(handler, sender)
+        }
+
+        fn new(
+            handler: JoinHandle<Result<(), notify::Error>>,
+            exit_shot: oneshot::Sender<bool>,
+        ) -> Self {
+            Self { handler, exit_shot }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncExitExt for FileWatcher {
+        async fn _send_terminate(&self) -> Option<()> {
+            self.exit_shot.send(true).ok()
+        }
+
+        fn is_finished(&self) -> bool {
+            self.handler.is_finished()
         }
     }
 }
 
+pub use files::FileDaemon;
 pub use types::FileEventHelper;
+pub use watcher::FileWatcher;

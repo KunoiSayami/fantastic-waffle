@@ -7,7 +7,8 @@ mod file;
 mod server;
 
 use crate::configure::current::Configure;
-use crate::server::AUTH_POOL;
+use crate::file::{FileDaemon, FileWatcher};
+use crate::server::{WebServer, DEFAULT_WAIT_TIME};
 use clap::{arg, command};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -21,8 +22,10 @@ async fn async_main(
     skip_check: bool,
 ) -> anyhow::Result<()> {
     let config = Configure::load(config_path).await?;
-    AUTH_POOL.set(RwLock::new(config.build_hashmap())).unwrap();
     let bind = config.parse_host_and_port(host, port);
+    let user_pool = Arc::new(RwLock::new(config.build_hashmap()));
+
+    //let web_server = WebServer::router_start(bind, user_pool.clone());
     Ok(())
 }
 
@@ -34,9 +37,22 @@ fn main() -> anyhow::Result<()> {
             arg!(-l --listen [HOST] "Override server listen host"),
             arg!(-p --port [PORT] "Override server port"),
             arg!(--"skip-check" "Skip check existing files"),
+            arg!(--"server-timeout" "Override sever request timeout, if set more than 3, it will always set as 3")
+                .default_values(DEFAULT_WAIT_TIME),
         ])
         .get_matches();
     env_logger::Builder::from_default_env().init();
+
+    server::WAIT_TIME
+        .set({
+            let set_time = *matches.get_one::<u64>("server-timeout").unwrap();
+            if set_time > DEFAULT_WAIT_TIME {
+                DEFAULT_WAIT_TIME
+            } else {
+                set_time
+            }
+        })
+        .unwrap();
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

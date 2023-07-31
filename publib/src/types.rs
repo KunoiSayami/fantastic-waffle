@@ -1,6 +1,7 @@
 mod file_entry {
     use crate::PATH_UTF8_ERROR;
     use async_walkdir::DirEntry;
+    use serde_derive::{Deserialize, Serialize};
     use sqlx::sqlite::SqliteRow;
     use sqlx::{Error, FromRow, Row};
     use std::fmt::Display;
@@ -8,7 +9,7 @@ mod file_entry {
     use std::os::unix::prelude::MetadataExt;
     use std::path::Path;
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Deserialize, Serialize)]
     pub struct FileEntry {
         path: String,
         hash: String,
@@ -139,4 +140,55 @@ mod file_entry {
     }
 }
 
+mod thread_controller {
+
+    #[async_trait::async_trait]
+    pub trait AsyncExitExt {
+        async fn _send_terminate(&self) -> Option<()>;
+
+        fn is_finished(&self) -> bool;
+
+        async fn stop(&self, not_finished: fn() -> ()) -> Option<()> {
+            if !self.is_finished() {
+                self._send_terminate().await?;
+                for _ in 0..5 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if self.is_finished() {
+                        break;
+                    }
+                }
+                if !self.is_finished() {
+                    not_finished();
+                    return None;
+                }
+            }
+            Some(())
+        }
+    }
+
+    pub trait ExitExt {
+        fn _send_terminate(&self) -> Option<()>;
+
+        fn is_finished(&self) -> bool;
+
+        fn stop(&self, not_finished: fn() -> ()) -> Option<()> {
+            if !self.is_finished() {
+                self._send_terminate()?;
+                for _ in 0..5 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if self.is_finished() {
+                        break;
+                    }
+                }
+                if !self.is_finished() {
+                    not_finished();
+                    return None;
+                }
+            }
+            Some(())
+        }
+    }
+}
+
 pub use file_entry::FileEntry;
+pub use thread_controller::{AsyncExitExt, ExitExt};
