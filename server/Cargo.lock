@@ -250,6 +250,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-macros"
+version = "0.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdca6a10ecad987bda04e95606ef85a5417dcaac1a78455242d72e031e2b6b62"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.27",
+]
+
+[[package]]
 name = "axum-server"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -589,6 +601,7 @@ dependencies = [
  "async-walkdir",
  "axum",
  "axum-auth",
+ "axum-macros",
  "axum-server",
  "clap",
  "env_logger",

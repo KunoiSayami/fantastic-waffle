@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
             arg!(-p --port [PORT] "Override server port"),
             arg!(--"skip-check" "Skip check existing files"),
             arg!(--"server-timeout" "Override sever request timeout, if set more than 3, it will always set as 3")
-                .default_values(DEFAULT_WAIT_TIME),
+                .default_value(&*format!("{}", DEFAULT_WAIT_TIME)),
         ])
         .get_matches();
     env_logger::Builder::from_default_env().init();

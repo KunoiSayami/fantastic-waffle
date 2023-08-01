@@ -199,7 +199,7 @@ mod watcher {
     use crate::file::types::FileEventHelper;
     use log::{error, warn};
     use notify::{Event, EventKind, RecursiveMode, Watcher};
-    use publib::types::AsyncExitExt;
+    use publib::types::{AsyncExitExt, ExitExt};
     use std::path::Path;
     use std::thread::JoinHandle;
     use tap::TapOptional;
@@ -249,7 +249,10 @@ mod watcher {
             }
         }
 
-        pub fn start<P: AsRef<Path>>(path: P, event_helper: FileEventHelper) -> Self {
+        pub fn start<P: AsRef<Path> + Send + 'static>(
+            path: P,
+            event_helper: FileEventHelper,
+        ) -> Self {
             let (sender, receiver) = oneshot::channel();
             let handler = std::thread::spawn(move || Self::watcher(path, receiver, event_helper));
             Self::new(handler, sender)
@@ -263,9 +266,8 @@ mod watcher {
         }
     }
 
-    #[async_trait::async_trait]
-    impl AsyncExitExt for FileWatcher {
-        async fn _send_terminate(&self) -> Option<()> {
+    impl ExitExt for FileWatcher {
+        fn _send_terminate(self) -> Option<()> {
             self.exit_shot.send(true).ok()
         }
 
