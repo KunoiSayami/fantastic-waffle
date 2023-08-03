@@ -1,25 +1,31 @@
 mod files {
     use super::FileEventHelper;
-    use crate::database::current::{delete, insert, mark, query_path, reset_all_mark, update};
+    use crate::configure::current::Configure;
+    use crate::configure::RwPoolType;
+    use crate::database::current::{
+        delete, delete_all_unmarked, insert, mark, query, query_path, reset_all_mark, update,
+    };
     use crate::file::types::FileEvent;
     use anyhow::anyhow;
     use async_walkdir::WalkDir;
     use futures::StreamExt;
-    use log::{error, info};
+    use log::{error, info, warn};
     use publib::file::get_hash;
-    use publib::types::{AsyncExitExt, FileEntry};
+    use publib::types::{FileEntry, OptionFile};
     use publib::PATH_UTF8_ERROR;
     use sqlx::SqliteConnection;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
 
-    pub async fn init_files(conn: &mut SqliteConnection, path: String) -> anyhow::Result<()> {
+    pub async fn init_files(conn: &mut SqliteConnection, path: &str) -> anyhow::Result<()> {
         reset_all_mark(conn).await?;
         let mut entries = WalkDir::new(path);
         while let Some(Ok(entry)) = entries.next().await {
             process_file(conn, entry).await?;
         }
+        delete_all_unmarked(conn).await?;
         Ok(())
     }
 
@@ -50,6 +56,7 @@ mod files {
                 update(conn, entry).await?;
             }
         }
+
         Ok(())
     }
 
@@ -103,6 +110,7 @@ mod files {
         async fn handler(
             mut conn: SqliteConnection,
             mut receiver: mpsc::Receiver<FileEvent>,
+            user_pool: Arc<RwPoolType>,
         ) -> anyhow::Result<()> {
             while let Some(event) = receiver.recv().await {
                 match event {
@@ -116,23 +124,52 @@ mod files {
                     FileEvent::Unknown => {
                         unreachable!()
                     }
-                    FileEvent::Request(path, sender) => {}
+                    FileEvent::Request(paths, sender) => {
+                        let mut v = Vec::new();
+                        for path in paths {
+                            let q = query(&mut conn, &path)
+                                .await
+                                .inspect_err(|e| error!("Query file error: {:?}", e))?;
+                            v.push(OptionFile::from_option_entry(path, q));
+                        }
+                        sender
+                            .send(v)
+                            .inspect_err(|_| error!("Unable to send query result to client"))
+                            .ok();
+                    }
+                    FileEvent::ConfigureUpdated(path) => match Configure::load(path).await {
+                        Ok(config) => {
+                            let mut pool = user_pool.write().await;
+                            *pool = config.build_hashmap();
+                            info!("User pool update, current size: {}", pool.len());
+                        }
+                        Err(e) => {
+                            warn!("Unable to reload configure file: {:?}", e);
+                        }
+                    },
                 }
             }
             Ok(())
         }
 
-        pub fn start(conn: SqliteConnection) -> (Self, FileEventHelper) {
+        pub fn start(
+            conn: SqliteConnection,
+            user_pool: Arc<RwPoolType>,
+        ) -> (Self, FileEventHelper) {
             let (helper, receiver) = FileEventHelper::new();
-            let handler = tokio::spawn(Self::handler(conn, receiver));
+            let handler = tokio::spawn(Self::handler(conn, receiver, user_pool));
             (Self { handler }, helper)
+        }
+
+        pub fn into_inner(self) -> JoinHandle<anyhow::Result<()>> {
+            self.handler
         }
     }
 }
 
 mod types {
     use notify::{Event, EventKind};
-    use publib::types::FileEntry;
+    use publib::types::OptionFile;
     use publib::PATH_UTF8_ERROR;
     use std::path::PathBuf;
     use tokio::sync::{mpsc, oneshot};
@@ -141,8 +178,9 @@ mod types {
         New(Vec<String>),
         Update(Vec<String>),
         Remove(Vec<String>),
+        ConfigureUpdated(String),
         /// Request files (from https)
-        Request(Vec<String>, oneshot::Sender<Vec<FileEntry>>),
+        Request(Vec<String>, oneshot::Sender<Vec<OptionFile>>),
         Terminate,
         Unknown,
     }
@@ -177,14 +215,25 @@ mod types {
             (Self { upstream: sender }, receiver)
         }
 
-        pub async fn send(&self, event: Event) -> Option<()> {
+        pub(super) async fn send(&self, event: Event) -> Option<()> {
             self.upstream.send(event.into()).await.ok()
+        }
+
+        pub(super) async fn send_configure_updated(&self, path: String) -> Option<()> {
+            self.upstream
+                .send(FileEvent::ConfigureUpdated(path))
+                .await
+                .ok()
+        }
+
+        pub async fn send_terminate(&self) -> Option<()> {
+            self.upstream.send(FileEvent::Terminate).await.ok()
         }
 
         pub async fn send_request(
             &self,
             paths: Vec<String>,
-        ) -> Option<oneshot::Receiver<Vec<FileEntry>>> {
+        ) -> Option<oneshot::Receiver<Vec<OptionFile>>> {
             let (sender, receiver) = oneshot::channel();
             self.upstream
                 .send(FileEvent::Request(paths, sender))
@@ -199,14 +248,14 @@ mod watcher {
     use crate::file::types::FileEventHelper;
     use log::{error, warn};
     use notify::{Event, EventKind, RecursiveMode, Watcher};
-    use publib::types::{AsyncExitExt, ExitExt};
+    use publib::types::ExitExt;
+    use publib::PATH_UTF8_ERROR;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::thread::JoinHandle;
     use std::time::Duration;
     use tap::TapOptional;
-    use tokio::sync::oneshot;
 
     #[derive(Debug)]
     pub struct FileWatcher {
@@ -215,16 +264,24 @@ mod watcher {
     }
 
     impl FileWatcher {
-        pub fn watcher<P: AsRef<Path>>(
+        fn watcher<P: AsRef<Path>>(
             path: P,
-            config_path: P,
+            config_path: String,
             exit_signal: Arc<AtomicBool>,
             upstream: FileEventHelper,
         ) -> Result<(), notify::Error> {
+            let sub_path = config_path.clone();
             let mut watcher = notify::recommended_watcher(move |res| match res {
-                Ok(event) => {}
-                Err(e) => {}
+                Ok(event) => {
+                    Self::event_handler(event, &upstream, &config_path);
+                }
+                Err(e) => {
+                    warn!("[file watcher]Watcher got error: {:?}", e);
+                }
             })?;
+            watcher
+                .watch(sub_path.as_ref(), RecursiveMode::NonRecursive)
+                .inspect_err(|e| error!("[file watcher]Unable to watch configure file: {:?}", e))?;
             watcher
                 .watch(path.as_ref(), RecursiveMode::Recursive)
                 .inspect_err(|e| error!("[file watcher]Unable to watch directory: {:?}", e))?;
@@ -242,7 +299,27 @@ mod watcher {
             Ok(())
         }
 
-        pub fn event_handler(event: Event, upstream: FileEventHelper) {
+        fn event_handler(event: Event, upstream: &FileEventHelper, configure: &str) {
+            if let EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )) = event.kind
+            {
+                for file in event
+                    .paths
+                    .iter()
+                    .map(|x| x.to_str().expect(PATH_UTF8_ERROR))
+                {
+                    if configure.eq(file) {
+                        tokio::runtime::Builder::new_multi_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap()
+                            .block_on(upstream.send_configure_updated(configure.to_string()))
+                            .tap_none(|| warn!("Unable send event to file daemon"));
+                    }
+                }
+            }
+
             match event.kind {
                 EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
                     tokio::runtime::Builder::new_multi_thread()
@@ -258,7 +335,7 @@ mod watcher {
 
         pub fn start<P: AsRef<Path> + Send + 'static>(
             path: P,
-            config_path: P,
+            config_path: String,
             event_helper: FileEventHelper,
         ) -> Self {
             let signal = Arc::new(AtomicBool::new(false));
@@ -284,6 +361,6 @@ mod watcher {
     }
 }
 
-pub use files::FileDaemon;
+pub use files::{init_files, process_file, FileDaemon};
 pub use types::FileEventHelper;
 pub use watcher::FileWatcher;

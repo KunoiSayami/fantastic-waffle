@@ -28,11 +28,7 @@ pub mod v1 {
         conn: &mut SqliteConnection,
         path: P,
     ) -> Result<Option<FileEntry>> {
-        query(
-            conn,
-            path.as_ref().to_str().expect(PATH_UTF8_ERROR).to_string(),
-        )
-        .await
+        query(conn, path.as_ref().to_str().expect(PATH_UTF8_ERROR)).await
     }
 
     pub async fn query_by_path(
@@ -48,7 +44,7 @@ pub mod v1 {
         .await
     }
 
-    pub async fn query(conn: &mut SqliteConnection, path: String) -> Result<Option<FileEntry>> {
+    pub async fn query(conn: &mut SqliteConnection, path: &str) -> Result<Option<FileEntry>> {
         sqlx::query_as::<_, FileEntry>(r#"SELECT * FROM "files" WHERE "path" = ?"#)
             .bind(path)
             .fetch_optional(conn)
@@ -87,7 +83,7 @@ pub mod v1 {
             .execute(conn)
             .await?;
         Ok(())
-    }
+    `}`
 
     pub async fn delete(conn: &mut SqliteConnection, path: String) -> Result<()> {
         let p: &Path = path.as_ref();
@@ -105,6 +101,13 @@ pub mod v1 {
                 .execute(conn)
                 .await?;
         }
+        Ok(())
+    }
+
+    pub async fn delete_all_unmarked(conn: &mut SqliteConnection) -> Result<()> {
+        sqlx::query(r#"DELETE FROM "files" WHERE "marked" = 0"#)
+            .execute(conn)
+            .await?;
         Ok(())
     }
 

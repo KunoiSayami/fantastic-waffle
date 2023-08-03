@@ -1,76 +1,52 @@
 pub mod v1 {
-    use super::auth::check_auth;
+    use crate::configure::RwPoolType;
     use crate::file::FileEventHelper;
     use crate::server::auth::AuthLayer;
     use crate::server::{WebResponse, DEFAULT_WAIT_TIME};
     use anyhow::anyhow;
-    use axum::extract::State;
+    use axum::extract::Path;
     use axum::http::StatusCode;
-    use axum::middleware::from_fn_with_state;
     use axum::response::IntoResponse;
     use axum::{Extension, Json, Router};
-    use axum_macros::debug_handler;
-    use http::{Request, Response};
+    use http::Request;
     use hyper::Body;
-    use publib::types::ExitExt;
-    use serde_json::{json, Value};
-    use std::collections::HashMap;
-    use std::sync::{Arc, OnceLock};
+    use serde_json::json;
+    use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::RwLock;
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
     use tower::ServiceBuilder;
     use tower_http::auth::AsyncRequireAuthorizationLayer;
     use tower_http::trace::TraceLayer;
 
-    #[derive(Debug)]
-    pub struct WebServer {
-        join_handler: JoinHandle<std::io::Result<()>>,
-        handler: axum_server::Handle,
+    pub fn router_start(
+        bind: String,
+        user_pool: Arc<RwPoolType>,
+        helper: FileEventHelper,
+    ) -> (JoinHandle<std::io::Result<()>>, axum_server::Handle) {
+        let router = Router::new()
+            .route(
+                "/",
+                axum::routing::get(|| async {
+                    Json(json!({"version": env!("CARGO_PKG_VERSION"), "status": 200}))
+                }),
+            )
+            .route("/file/*path", axum::routing::get(get_file))
+            .route("/query", axum::routing::get(query))
+            .fallback(|| async { (StatusCode::FORBIDDEN, "403 Forbidden") })
+            .route_layer(AsyncRequireAuthorizationLayer::new(AuthLayer))
+            .layer(Extension(user_pool))
+            .layer(Extension(helper))
+            .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()));
+        let server_handler = axum_server::Handle::new();
+        let server = tokio::spawn(
+            axum_server::bind(bind.parse().unwrap())
+                .handle(server_handler.clone())
+                .serve(router.into_make_service()),
+        );
+        (server, server_handler)
     }
 
-    impl WebServer {
-        pub fn router_start(
-            bind: String,
-            user_pool: Arc<RwLock<HashMap<String, Vec<String>>>>,
-            helper: FileEventHelper,
-        ) -> Self {
-            let router = Router::new()
-                .route(
-                    "/",
-                    axum::routing::get(|| async {
-                        Json(json!({"version": env!("CARGO_PKG_VERSION"), "status": 200}))
-                    }),
-                )
-                .route("/file/*path", axum::routing::get(get_file))
-                .route("/query", axum::routing::get(query))
-                .fallback(|| async { (StatusCode::FORBIDDEN, "403 Forbidden") })
-                .route_layer(AsyncRequireAuthorizationLayer::new(AuthLayer))
-                .layer(Extension(user_pool))
-                .layer(Extension(helper))
-                .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()));
-            let server_handler = axum_server::Handle::new();
-            let server = tokio::spawn(
-                axum_server::bind(bind.parse().unwrap())
-                    .handle(server_handler.clone())
-                    .serve(router.into_make_service()),
-            );
-            Self::new(server, server_handler)
-        }
-
-        fn new(
-            join_handler: JoinHandle<std::io::Result<()>>,
-            handler: axum_server::Handle,
-        ) -> Self {
-            Self {
-                join_handler,
-                handler,
-            }
-        }
-    }
-
-    #[debug_handler]
     async fn query(
         Extension(sender): Extension<FileEventHelper>,
         request: Request<Body>,
@@ -80,6 +56,7 @@ pub mod v1 {
         if paths.is_none() {
             return WebResponse::internal_server_error(Some("Paths is None".to_string()));
         }
+
         if let Some(receiver) = sender.send_request(paths.unwrap().to_owned()).await {
             return if let Ok(result) =
                 timeout(Duration::from_secs(DEFAULT_WAIT_TIME), receiver).await
@@ -95,18 +72,18 @@ pub mod v1 {
         WebResponse::forbidden(None)
     }
 
-    async fn get_file() -> impl IntoResponse {
-        (StatusCode::FORBIDDEN).into_response()
-    }
+    async fn get_file(
+        Path(path): Path<String>,
+        request: Request<Body>,
+    ) -> Result<impl IntoResponse, WebResponse> {
+        let paths = request.extensions().get::<Vec<String>>();
 
-    impl ExitExt for WebServer {
-        fn _send_terminate(&self) -> Option<()> {
-            Some(self.handler.shutdown())
+        if paths.is_none() {
+            return Err(WebResponse::internal_server_error(Some(
+                "Paths is None".to_string(),
+            )));
         }
-
-        fn is_finished(&self) -> bool {
-            self.join_handler.is_finished()
-        }
+        Ok(WebResponse::forbidden(None))
     }
 }
 
@@ -183,22 +160,15 @@ mod types {
 
 mod auth {
     use axum::body::BoxBody;
-    use axum::extract::State;
-    use axum::middleware::Next;
-    use axum::response::IntoResponse;
     use axum::Extension;
-    use axum_macros::debug_handler;
     use log::warn;
-    use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::sync::RwLock;
 
-    use crate::server::WebResponse;
+    use crate::configure::RwPoolType;
     use futures_util::future::BoxFuture;
-    use http::{header::AUTHORIZATION, StatusCode};
-    use hyper::{Body, Error, Request, Response};
-    use tower::{service_fn, Service, ServiceBuilder, ServiceExt};
-    use tower_http::auth::{AsyncAuthorizeRequest, AsyncRequireAuthorizationLayer};
+    use http::StatusCode;
+    use hyper::{Request, Response};
+    use tower_http::auth::AsyncAuthorizeRequest;
 
     #[derive(Clone, Copy)]
     pub struct AuthLayer;
@@ -208,15 +178,13 @@ mod auth {
         B: Send + Sync + 'static,
     {
         type RequestBody = B;
-        type ResponseBody = axum::body::BoxBody;
+        // https://github.com/tower-rs/tower-http/discussions/346
+        type ResponseBody = BoxBody;
         type Future = BoxFuture<'static, Result<Request<B>, Response<Self::ResponseBody>>>;
 
         fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
             Box::pin(async {
-                let pool = request
-                    .extensions()
-                    .get::<Arc<RwLock<HashMap<String, Vec<String>>>>>()
-                    .unwrap();
+                let pool = request.extensions().get::<Arc<RwPoolType>>().unwrap();
                 if let Some(user_id) = check_auth(&request, pool).await {
                     // Set `user_id` as a request extension so it can be accessed by other
                     // services down the stack.
@@ -237,7 +205,7 @@ mod auth {
 
     pub(super) async fn check_auth<B>(
         request: &Request<B>,
-        pool: &Arc<RwLock<HashMap<String, Vec<String>>>>,
+        pool: &Arc<RwPoolType>,
     ) -> Option<Vec<String>> {
         let client_map = pool.read().await;
         if let Some(bearer) = request.headers().get("Authorization") {
@@ -254,45 +222,6 @@ mod auth {
         }
         None
     }
-
-    /*async fn path_check<B>(request: &Request<B>) -> Result<Option<String>, WebResponse> {
-        let path = request.uri().path();
-        if ["/query", "/file"].iter().any(|s| path.starts_with(s)) {
-            if let Some(bearer) = request.headers().get("Authorization") {
-                let bearer = bearer.to_str().map_err(|e| {
-                    warn!("Unable decode authorization header: {:?}", e);
-                    WebResponse::forbidden_note("Fail to decode header")
-                })?;
-                if !bearer.starts_with("bearer ") {
-                    return Err(WebResponse::forbidden_note("Authorization format error!"));
-                }
-                let (_, bearer) = bearer.split_once("bearer ").unwrap();
-                return Ok(Some(bearer.to_string()));
-            }
-            return Err(WebResponse::forbidden_note("Missing authorization header"));
-        }
-        Ok(None)
-    }
-
-    pub(super) async fn new_check_auth<B>(
-        State(user_pool): State<Arc<RwLock<HashMap<String, Vec<String>>>>>,
-        mut request: Request<B>,
-        next: Next<B>,
-    ) -> Response<B> {
-        let client_map = user_pool.read().await;
-        match path_check(&request).await {
-            Ok(Some(bearer)) => match client_map.get(&bearer) {
-                Some(result) => {
-                    request.extensions_mut().insert(Extension(result.clone()));
-                }
-                None => return WebResponse::forbidden_note("Client not found").into_response(),
-            },
-            Err(e) => return e.into_response(),
-            _ => {}
-        }
-
-        return next.run(request).await;
-    }*/
 }
 
 use std::sync::OnceLock;
@@ -301,6 +230,5 @@ pub use v1 as current;
 pub const DEFAULT_WAIT_TIME: u64 = 3;
 pub const DEFAULT_WAIT_TIME_STR: &str = "3";
 pub static WAIT_TIME: OnceLock<u64> = OnceLock::new();
-use auth::AuthLayer;
-pub use current::WebServer;
+pub use current::router_start;
 pub use types::WebResponse;

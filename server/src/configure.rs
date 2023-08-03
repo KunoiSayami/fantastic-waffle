@@ -1,11 +1,12 @@
 pub mod v1 {
+    use crate::configure::PoolType;
     use anyhow::anyhow;
     use serde_derive::Deserialize;
     use std::collections::HashMap;
-    use std::fmt::Display;
     use std::path::Path;
-    use tap::TapFallible;
     use tokio::fs::read_to_string;
+
+    pub const DEFAULT_DATABASE_LOCATION: &str = "files.db";
 
     #[derive(Clone, Debug, Deserialize)]
     pub struct AuthEntry {
@@ -44,6 +45,7 @@ pub mod v1 {
     #[derive(Clone, Debug, Deserialize)]
     pub struct Configure {
         working_directory: String,
+        database: Option<String>,
         server: Server,
         auth_entry: Vec<AuthEntry>,
     }
@@ -54,6 +56,14 @@ pub mod v1 {
         }
         pub fn auth_entry(&self) -> &Vec<AuthEntry> {
             &self.auth_entry
+        }
+
+        pub fn database(&self) -> String {
+            if let Some(ref database) = self.database {
+                database.clone()
+            } else {
+                DEFAULT_DATABASE_LOCATION.to_string()
+            }
         }
 
         pub async fn load<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
@@ -80,9 +90,9 @@ pub mod v1 {
             self.server().get_bind()
         }
 
-        pub fn build_hashmap(&self) -> HashMap<String, Vec<String>> {
+        pub fn build_hashmap(&self) -> PoolType {
             let mut m = HashMap::new();
-            for auth_entry in &self.auth_entry {
+            for auth_entry in self.auth_entry() {
                 m.insert(auth_entry.token().to_string(), auth_entry.path().clone());
             }
             m
@@ -90,4 +100,8 @@ pub mod v1 {
     }
 }
 
+use std::collections::HashMap;
+use tokio::sync::RwLock;
 pub use v1 as current;
+pub type PoolType = HashMap<String, Vec<String>>;
+pub type RwPoolType = RwLock<PoolType>;

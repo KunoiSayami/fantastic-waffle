@@ -1,4 +1,5 @@
 mod file_entry {
+    use crate::types::{FileMeta, OptionFile};
     use crate::PATH_UTF8_ERROR;
     use async_walkdir::DirEntry;
     use serde_derive::{Deserialize, Serialize};
@@ -138,6 +139,84 @@ mod file_entry {
             ))
         }
     }
+
+    impl From<FileEntry> for OptionFile {
+        fn from(value: FileEntry) -> Self {
+            Self::new(
+                value.path,
+                Some(FileMeta::new(
+                    value.hash,
+                    value.mtime,
+                    value.size,
+                    value.is_dir,
+                )),
+            )
+        }
+    }
+
+    impl From<FileEntry> for FileMeta {
+        fn from(value: FileEntry) -> Self {
+            Self::new(value.hash, value.mtime, value.size, value.is_dir)
+        }
+    }
+}
+
+mod option_file_entry {
+    use crate::types::FileEntry;
+    use serde_derive::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub struct FileMeta {
+        hash: String,
+        mtime: i64,
+        size: i64,
+        is_dir: bool,
+    }
+
+    impl FileMeta {
+        pub fn new(hash: String, mtime: i64, size: i64, is_dir: bool) -> Self {
+            Self {
+                hash,
+                mtime,
+                size,
+                is_dir,
+            }
+        }
+
+        pub fn into_file_entry(self, path: String) -> FileEntry {
+            FileEntry::new(path, self.hash, self.mtime, self.size, self.is_dir)
+        }
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    pub struct OptionFile {
+        path: String,
+        meta: Option<FileMeta>,
+    }
+
+    impl OptionFile {
+        pub fn is_exist(&self) -> bool {
+            return self.meta.is_some();
+        }
+        pub fn new(path: String, meta: Option<FileMeta>) -> Self {
+            Self { path, meta }
+        }
+
+        pub fn new_empty(path: String) -> Self {
+            Self::new(path, None)
+        }
+
+        pub fn into_file_entry(self) -> Option<FileEntry> {
+            Some(self.meta?.into_file_entry(self.path))
+        }
+
+        pub fn from_option_entry(path: String, entry: Option<FileEntry>) -> Self {
+            match entry {
+                None => Self::new_empty(path),
+                Some(entry) => entry.into(),
+            }
+        }
+    }
 }
 
 mod thread_controller {
@@ -191,4 +270,5 @@ mod thread_controller {
 }
 
 pub use file_entry::FileEntry;
+pub use option_file_entry::{FileMeta, OptionFile};
 pub use thread_controller::{AsyncExitExt, ExitExt};
