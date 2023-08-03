@@ -1,9 +1,12 @@
 pub mod v1 {
     use super::auth::check_auth;
     use crate::file::FileEventHelper;
+    use crate::server::auth::AuthLayer;
     use crate::server::{WebResponse, DEFAULT_WAIT_TIME};
     use anyhow::anyhow;
+    use axum::extract::State;
     use axum::http::StatusCode;
+    use axum::middleware::from_fn_with_state;
     use axum::response::IntoResponse;
     use axum::{Extension, Json, Router};
     use axum_macros::debug_handler;
@@ -42,8 +45,9 @@ pub mod v1 {
                 )
                 .route("/file/*path", axum::routing::get(get_file))
                 .route("/query", axum::routing::get(query))
-                //.fallback(|| async { (StatusCode::FORBIDDEN, "403 Forbidden") })
-                //.layer(AsyncRequireAuthorizationLayer::new(super::AuthLayer))
+                .fallback(|| async { (StatusCode::FORBIDDEN, "403 Forbidden") })
+                .route_layer(AsyncRequireAuthorizationLayer::new(AuthLayer))
+                .layer(Extension(user_pool))
                 .layer(Extension(helper))
                 .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()));
             let server_handler = axum_server::Handle::new();
@@ -66,11 +70,17 @@ pub mod v1 {
         }
     }
 
+    #[debug_handler]
     async fn query(
         Extension(sender): Extension<FileEventHelper>,
-        Extension(paths): Extension<Vec<String>>,
+        request: Request<Body>,
     ) -> WebResponse {
-        if let Some(receiver) = sender.send_request(paths).await {
+        let paths = request.extensions().get::<Vec<String>>();
+
+        if paths.is_none() {
+            return WebResponse::internal_server_error(Some("Paths is None".to_string()));
+        }
+        if let Some(receiver) = sender.send_request(paths.unwrap().to_owned()).await {
             return if let Ok(result) =
                 timeout(Duration::from_secs(DEFAULT_WAIT_TIME), receiver).await
             {
@@ -123,6 +133,10 @@ mod types {
             Self::new(StatusCode::FORBIDDEN, None, reason)
         }
 
+        pub fn forbidden_note(reason: &'static str) -> Self {
+            Self::new(StatusCode::FORBIDDEN, None, Some(reason.to_string()))
+        }
+
         pub fn internal_server_error(reason: Option<String>) -> Self {
             Self::new(StatusCode::INTERNAL_SERVER_ERROR, None, reason)
         }
@@ -168,19 +182,23 @@ mod types {
 }
 
 mod auth {
+    use axum::body::BoxBody;
+    use axum::extract::State;
+    use axum::middleware::Next;
+    use axum::response::IntoResponse;
     use axum::Extension;
     use axum_macros::debug_handler;
-    use futures_core::future::BoxFuture;
     use log::warn;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
+    use crate::server::WebResponse;
+    use futures_util::future::BoxFuture;
     use http::{header::AUTHORIZATION, StatusCode};
     use hyper::{Body, Error, Request, Response};
     use tower::{service_fn, Service, ServiceBuilder, ServiceExt};
     use tower_http::auth::{AsyncAuthorizeRequest, AsyncRequireAuthorizationLayer};
-    //use futures_util::future::BoxFuture;
 
     #[derive(Clone, Copy)]
     pub struct AuthLayer;
@@ -190,7 +208,7 @@ mod auth {
         B: Send + Sync + 'static,
     {
         type RequestBody = B;
-        type ResponseBody = Body;
+        type ResponseBody = axum::body::BoxBody;
         type Future = BoxFuture<'static, Result<Request<B>, Response<Self::ResponseBody>>>;
 
         fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
@@ -202,13 +220,13 @@ mod auth {
                 if let Some(user_id) = check_auth(&request, pool).await {
                     // Set `user_id` as a request extension so it can be accessed by other
                     // services down the stack.
-                    request.extensions_mut().insert(user_id);
+                    request.extensions_mut().insert(Extension(user_id));
 
                     Ok(request)
                 } else {
                     let unauthorized_response = Response::builder()
                         .status(StatusCode::UNAUTHORIZED)
-                        .body(Body::empty())
+                        .body(BoxBody::default())
                         .unwrap();
 
                     Err(unauthorized_response)
@@ -236,12 +254,52 @@ mod auth {
         }
         None
     }
+
+    /*async fn path_check<B>(request: &Request<B>) -> Result<Option<String>, WebResponse> {
+        let path = request.uri().path();
+        if ["/query", "/file"].iter().any(|s| path.starts_with(s)) {
+            if let Some(bearer) = request.headers().get("Authorization") {
+                let bearer = bearer.to_str().map_err(|e| {
+                    warn!("Unable decode authorization header: {:?}", e);
+                    WebResponse::forbidden_note("Fail to decode header")
+                })?;
+                if !bearer.starts_with("bearer ") {
+                    return Err(WebResponse::forbidden_note("Authorization format error!"));
+                }
+                let (_, bearer) = bearer.split_once("bearer ").unwrap();
+                return Ok(Some(bearer.to_string()));
+            }
+            return Err(WebResponse::forbidden_note("Missing authorization header"));
+        }
+        Ok(None)
+    }
+
+    pub(super) async fn new_check_auth<B>(
+        State(user_pool): State<Arc<RwLock<HashMap<String, Vec<String>>>>>,
+        mut request: Request<B>,
+        next: Next<B>,
+    ) -> Response<B> {
+        let client_map = user_pool.read().await;
+        match path_check(&request).await {
+            Ok(Some(bearer)) => match client_map.get(&bearer) {
+                Some(result) => {
+                    request.extensions_mut().insert(Extension(result.clone()));
+                }
+                None => return WebResponse::forbidden_note("Client not found").into_response(),
+            },
+            Err(e) => return e.into_response(),
+            _ => {}
+        }
+
+        return next.run(request).await;
+    }*/
 }
 
 use std::sync::OnceLock;
 pub use v1 as current;
 
 pub const DEFAULT_WAIT_TIME: u64 = 3;
+pub const DEFAULT_WAIT_TIME_STR: &str = "3";
 pub static WAIT_TIME: OnceLock<u64> = OnceLock::new();
 use auth::AuthLayer;
 pub use current::WebServer;

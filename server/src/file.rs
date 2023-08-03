@@ -201,19 +201,24 @@ mod watcher {
     use notify::{Event, EventKind, RecursiveMode, Watcher};
     use publib::types::{AsyncExitExt, ExitExt};
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
+    use std::time::Duration;
     use tap::TapOptional;
+    use tokio::sync::oneshot;
 
     #[derive(Debug)]
     pub struct FileWatcher {
         handler: JoinHandle<Result<(), notify::Error>>,
-        exit_shot: oneshot::Sender<bool>,
+        exit_shot: Arc<AtomicBool>,
     }
 
     impl FileWatcher {
         pub fn watcher<P: AsRef<Path>>(
             path: P,
-            exit_signal: oneshot::Receiver<bool>,
+            config_path: P,
+            exit_signal: Arc<AtomicBool>,
             upstream: FileEventHelper,
         ) -> Result<(), notify::Error> {
             let mut watcher = notify::recommended_watcher(move |res| match res {
@@ -223,12 +228,14 @@ mod watcher {
             watcher
                 .watch(path.as_ref(), RecursiveMode::Recursive)
                 .inspect_err(|e| error!("[file watcher]Unable to watch directory: {:?}", e))?;
-            exit_signal
-                .recv()
-                .inspect_err(|e| {
-                    error!("[file watcher]Got error while poll oneshot event: {:?}", e)
-                })
-                .ok();
+
+            loop {
+                if exit_signal.load(Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
             watcher
                 .unwatch(path.as_ref())
                 .inspect_err(|e| error!("[file watcher]Unable to unwatch directory: {:?}", e))?;
@@ -251,24 +258,24 @@ mod watcher {
 
         pub fn start<P: AsRef<Path> + Send + 'static>(
             path: P,
+            config_path: P,
             event_helper: FileEventHelper,
         ) -> Self {
-            let (sender, receiver) = oneshot::channel();
-            let handler = std::thread::spawn(move || Self::watcher(path, receiver, event_helper));
-            Self::new(handler, sender)
+            let signal = Arc::new(AtomicBool::new(false));
+            let signal2 = Arc::clone(&signal);
+            let handler =
+                std::thread::spawn(move || Self::watcher(path, config_path, signal, event_helper));
+            Self::new(handler, signal2)
         }
 
-        fn new(
-            handler: JoinHandle<Result<(), notify::Error>>,
-            exit_shot: oneshot::Sender<bool>,
-        ) -> Self {
+        fn new(handler: JoinHandle<Result<(), notify::Error>>, exit_shot: Arc<AtomicBool>) -> Self {
             Self { handler, exit_shot }
         }
     }
 
     impl ExitExt for FileWatcher {
-        fn _send_terminate(self) -> Option<()> {
-            self.exit_shot.send(true).ok()
+        fn _send_terminate(&self) -> Option<()> {
+            Some(self.exit_shot.store(true, Ordering::Relaxed))
         }
 
         fn is_finished(&self) -> bool {

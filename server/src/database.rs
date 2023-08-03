@@ -1,10 +1,8 @@
 pub mod v1 {
     use format_sql_query::QuotedData;
-    use futures::executor::Enter;
     use publib::types::FileEntry;
     use publib::PATH_UTF8_ERROR;
     use sqlx::{Result, SqliteConnection};
-    use std::fmt::Display;
     use std::path::Path;
 
     pub const VERSION: &str = "1";

@@ -8,7 +8,7 @@ mod server;
 
 use crate::configure::current::Configure;
 use crate::file::{FileDaemon, FileWatcher};
-use crate::server::{WebServer, DEFAULT_WAIT_TIME};
+use crate::server::{WebServer, DEFAULT_WAIT_TIME, DEFAULT_WAIT_TIME_STR};
 use clap::{arg, command};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
             arg!(-p --port [PORT] "Override server port"),
             arg!(--"skip-check" "Skip check existing files"),
             arg!(--"server-timeout" "Override sever request timeout, if set more than 3, it will always set as 3")
-                .default_value(&*format!("{}", DEFAULT_WAIT_TIME)),
+                .default_value(DEFAULT_WAIT_TIME_STR),
         ])
         .get_matches();
     env_logger::Builder::from_default_env().init();

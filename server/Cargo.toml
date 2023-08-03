@@ -15,7 +15,7 @@ clap = { version = "4.3.17", features = ["cargo"] }
 env_logger = { version = "0.10.0", features = ["auto-color"] }
 format-sql-query = "0.4.0"
 futures = { version = "0.3.28", features = ["unstable"] }
-futures-core = { version = "0.3.28", features = ["unstable"] }
+futures-util = { version = "0.3.28", features = ["unstable"] }
 heapless = "0.7.16"
 http = "0.2.9"
 hyper = { version = "0.14.27", features = ["http2"] }

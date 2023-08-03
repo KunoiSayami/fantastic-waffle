@@ -106,7 +106,7 @@ mod file_entry {
             Ok(Self::from_metadata(entry.path(), meta, hash))
         }
 
-        pub fn into_tb_row(&self) -> String {
+        pub fn to_tb_row(&self) -> String {
             format!(
                 "<tb><tr>{}</tr><tr>{}</tr><tr>{}</tr><tr>{}</tr><tr>{}</tr></tb>",
                 self.path, self.hash, self.mtime, self.size, self.is_dir
