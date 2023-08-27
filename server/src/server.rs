@@ -4,17 +4,20 @@ pub mod v1 {
     use crate::server::auth::AuthLayer;
     use crate::server::{WebResponse, DEFAULT_WAIT_TIME};
     use anyhow::anyhow;
+    use axum::body::StreamBody;
     use axum::extract::Path;
-    use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use axum::{Extension, Json, Router};
-    use http::Request;
+    use http::header::InvalidHeaderValue;
+    use http::{HeaderMap, HeaderValue, Request};
     use hyper::Body;
+    use publib::{check_penetration, PATH_UTF8_ERROR};
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
+    use tokio_util::io::ReaderStream;
     use tower::ServiceBuilder;
     use tower_http::auth::AsyncRequireAuthorizationLayer;
     use tower_http::trace::TraceLayer;
@@ -28,12 +31,14 @@ pub mod v1 {
             .route(
                 "/",
                 axum::routing::get(|| async {
-                    Json(json!({"version": env!("CARGO_PKG_VERSION"), "status": 200}))
+                    WebResponse::ok(Some(
+                        json!({"version": env!("CARGO_PKG_VERSION"), "status": 200}),
+                    ))
                 }),
             )
             .route("/file/*path", axum::routing::get(get_file))
             .route("/query", axum::routing::get(query))
-            .fallback(|| async { (StatusCode::FORBIDDEN, "403 Forbidden") })
+            .fallback(|| async { WebResponse::forbidden(None) })
             .route_layer(AsyncRequireAuthorizationLayer::new(AuthLayer))
             .layer(Extension(user_pool))
             .layer(Extension(helper))
@@ -54,7 +59,7 @@ pub mod v1 {
         let paths = request.extensions().get::<Vec<String>>();
 
         if paths.is_none() {
-            return WebResponse::internal_server_error(Some("Paths is None".to_string()));
+            return WebResponse::internal_server_error_str(Some("Paths is None"));
         }
 
         if let Some(receiver) = sender.send_request(paths.unwrap().to_owned()).await {
@@ -72,18 +77,61 @@ pub mod v1 {
         WebResponse::forbidden(None)
     }
 
+    fn build_filename_value(filename: &str) -> Result<HeaderValue, InvalidHeaderValue> {
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename))
+    }
+
     async fn get_file(
         Path(path): Path<String>,
         request: Request<Body>,
     ) -> Result<impl IntoResponse, WebResponse> {
         let paths = request.extensions().get::<Vec<String>>();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            "application/octet-stream".parse().unwrap(),
+        );
 
         if paths.is_none() {
-            return Err(WebResponse::internal_server_error(Some(
-                "Paths is None".to_string(),
+            return Err(WebResponse::internal_server_error_str(Some(
+                "Paths is None",
             )));
         }
-        Ok(WebResponse::forbidden(None))
+
+        // Check path penetration
+        if !check_penetration(&path) {
+            return Err(WebResponse::forbidden(None));
+        }
+
+        // Check request path is valid
+        if !paths.unwrap().iter().any(|p| path.starts_with(p)) {
+            return Err(WebResponse::forbidden(None));
+        }
+
+        let buf: &std::path::Path = path.as_ref();
+        if buf.is_dir() {
+            return Err(WebResponse::bad_request(Some("Request download directory")));
+        }
+
+        match buf.file_name() {
+            None => Err(WebResponse::internal_server_error_str(Some(
+                "Unable to get file name",
+            ))),
+            Some(filename) => {
+                headers.insert(
+                    http::header::CONTENT_DISPOSITION,
+                    build_filename_value(filename.to_str().expect(PATH_UTF8_ERROR)).unwrap(),
+                );
+                match tokio::fs::File::open(path).await {
+                    Ok(file) => {
+                        let body = StreamBody::new(ReaderStream::new(file));
+
+                        Ok((headers, body))
+                    }
+                    Err(e) => Err(WebResponse::from(anyhow!("Unable to read file: {:?}", e))),
+                }
+            }
+        }
     }
 }
 
@@ -116,6 +164,14 @@ mod types {
 
         pub fn internal_server_error(reason: Option<String>) -> Self {
             Self::new(StatusCode::INTERNAL_SERVER_ERROR, None, reason)
+        }
+
+        pub fn internal_server_error_str(reason: Option<&'static str>) -> Self {
+            Self::internal_server_error(reason.map(|s| s.to_string()))
+        }
+
+        pub fn bad_request(reason: Option<&'static str>) -> Self {
+            Self::new(StatusCode::BAD_REQUEST, None, reason.map(|s| s.to_string()))
         }
 
         pub fn gateway_timeout() -> Self {

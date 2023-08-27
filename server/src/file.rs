@@ -276,15 +276,17 @@ mod watcher {
                     Self::event_handler(event, &upstream, &config_path);
                 }
                 Err(e) => {
-                    warn!("[file watcher]Watcher got error: {:?}", e);
+                    warn!("[file watcher] Watcher got error: {:?}", e);
                 }
             })?;
             watcher
                 .watch(sub_path.as_ref(), RecursiveMode::NonRecursive)
-                .inspect_err(|e| error!("[file watcher]Unable to watch configure file: {:?}", e))?;
+                .inspect_err(|e| {
+                    error!("[file watcher] Unable to watch configure file: {:?}", e)
+                })?;
             watcher
                 .watch(path.as_ref(), RecursiveMode::Recursive)
-                .inspect_err(|e| error!("[file watcher]Unable to watch directory: {:?}", e))?;
+                .inspect_err(|e| error!("[file watcher] Unable to watch directory: {:?}", e))?;
 
             loop {
                 if exit_signal.load(Ordering::Relaxed) {
@@ -295,7 +297,7 @@ mod watcher {
 
             watcher
                 .unwatch(path.as_ref())
-                .inspect_err(|e| error!("[file watcher]Unable to unwatch directory: {:?}", e))?;
+                .inspect_err(|e| error!("[file watcher] Unable to unwatch directory: {:?}", e))?;
             Ok(())
         }
 

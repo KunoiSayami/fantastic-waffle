@@ -83,7 +83,7 @@ pub mod v1 {
             .execute(conn)
             .await?;
         Ok(())
-    `}`
+    }
 
     pub async fn delete(conn: &mut SqliteConnection, path: String) -> Result<()> {
         let p: &Path = path.as_ref();
