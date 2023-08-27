@@ -12,13 +12,15 @@ use crate::file::{init_files, FileDaemon, FileWatcher};
 use crate::server::{router_start, DEFAULT_WAIT_TIME, DEFAULT_WAIT_TIME_STR};
 use anyhow::anyhow;
 use clap::{arg, command};
-use log::warn;
+use log::{debug, warn};
+use publib::append_current_path;
 use publib::types::ExitExt;
 use std::env;
 use std::future::Future;
 use std::sync::Arc;
 use tap::TapOptional;
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 
 const DEFAULT_CONFIGURE_FILE: &str = "config.toml";
 
@@ -36,6 +38,20 @@ where
     std::process::exit(137);
 }
 
+async fn server_handler_waiter(
+    web_server: JoinHandle<std::io::Result<()>>,
+    file_watcher: FileWatcher,
+    file_daemon: FileDaemon,
+) -> anyhow::Result<()> {
+    web_server.await??;
+
+    file_watcher.stop(|| warn!("File watcher thread not stopped"));
+
+    file_daemon.into_inner().await??;
+
+    Ok(())
+}
+
 async fn async_main(
     config_path: String,
     host: Option<&String>,
@@ -48,11 +64,15 @@ async fn async_main(
         .await
         .map_err(|e| anyhow!("Unable to load database: {:?}", e))?;
 
-    env::set_current_dir(config.working_directory())
+    let config_path = append_current_path(&config_path);
+
+    env::set_current_dir(shellexpand::tilde(config.working_directory()).as_ref())
         .map_err(|e| anyhow!("Unable change directory: {:?}", e))?;
 
     let bind = config.parse_host_and_port(host, port);
     let user_pool = Arc::new(RwLock::new(config.build_hashmap()));
+
+    debug!("Current dir: {:?}", std::env::current_dir());
 
     if !skip_check {
         init_files(&mut database, ".")
@@ -66,22 +86,22 @@ async fn async_main(
 
     let file_watcher = FileWatcher::start(".", config_path, file_event_helper.clone());
 
-    //let web_server = WebServer::router_start(bind, user_pool.clone());
+    tokio::select! {
+        _ =
+            wait_to_stop(async || {
+                server_handler.shutdown();
+                file_event_helper
+                    .send_terminate()
+                    .await
+                    .tap_none(|| warn!("Unable send event to file daemon, maybe consumer has dropped!"));
+            }) => {
+            unreachable!()
+        }
 
-    wait_to_stop(async || {
-        server_handler.shutdown();
-        file_event_helper
-            .send_terminate()
-            .await
-            .tap_none(|| warn!("Unable send event to file daemon, maybe consumer has dropped!"));
-    })
-    .await;
-
-    web_server.await??;
-
-    file_watcher.stop(|| warn!("File watcher thread not stopped"));
-
-    file_daemon.into_inner().await??;
+        ret = server_handler_waiter(web_server, file_watcher, file_daemon) => {
+            ret?;
+        }
+    }
 
     Ok(())
 }
@@ -89,12 +109,12 @@ async fn async_main(
 fn main() -> anyhow::Result<()> {
     let matches = command!()
         .args(&[
-            arg!(-c --config [CONFIGURE_FILE] "Specify configure file location")
+            arg!(-c --config <CONFIGURE_FILE> "Specify configure file location")
                 .default_value(DEFAULT_CONFIGURE_FILE),
-            arg!(-l --listen [HOST] "Override server listen host"),
-            arg!(-p --port [PORT] "Override server port"),
+            arg!(-l --listen <HOST> "Override server listen host"),
+            arg!(-p --port <PORT> "Override server port"),
             arg!(--"skip-check" "Skip check existing files"),
-            arg!(--"server-timeout" "Override sever request timeout, if set more than 3, it will always set as 3")
+            arg!(--"server-timeout" <SERVER_TIMEOUT> "Override sever request timeout, if set more than 3, it will always set as 3")
                 .default_value(DEFAULT_WAIT_TIME_STR),
         ])
         .get_matches();
@@ -102,7 +122,10 @@ fn main() -> anyhow::Result<()> {
 
     server::WAIT_TIME
         .set({
-            let set_time = *matches.get_one::<u64>("server-timeout").unwrap();
+            let set_time: u64 = match matches.get_one::<String>("server-timeout").unwrap().parse() {
+                Ok(t) => t,
+                Err(_) => DEFAULT_WAIT_TIME,
+            };
             if set_time > DEFAULT_WAIT_TIME {
                 DEFAULT_WAIT_TIME
             } else {
@@ -116,12 +139,9 @@ fn main() -> anyhow::Result<()> {
         .build()
         .unwrap()
         .block_on(async_main(
-            matches
-                .get_one::<String>("CONFIGURE_FILE")
-                .unwrap()
-                .to_string(),
-            matches.get_one::<String>("HOST"),
-            matches.get_one::<u16>("PORT"),
+            matches.get_one::<String>("config").unwrap().to_string(),
+            matches.get_one::<String>("listen"),
+            matches.get_one::<u16>("port"),
             matches.get_flag("skip-check"),
         ))?;
     Ok(())

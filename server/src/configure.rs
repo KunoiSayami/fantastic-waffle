@@ -40,12 +40,23 @@ pub mod v1 {
         pub fn get_bind(&self) -> String {
             format!("{}:{}", self.host, self.port)
         }
+
+        fn new(host: String, port: u16) -> Self {
+            Self { host, port }
+        }
+    }
+
+    impl Default for Server {
+        fn default() -> Self {
+            Self::new("127.0.0.1".to_string(), 24146)
+        }
     }
 
     #[derive(Clone, Debug, Deserialize)]
     pub struct Configure {
         working_directory: String,
         database: Option<String>,
+        #[serde(default)]
         server: Server,
         auth_entry: Vec<AuthEntry>,
     }

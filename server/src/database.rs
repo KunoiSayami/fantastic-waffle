@@ -31,6 +31,7 @@ pub mod v1 {
         query(conn, path.as_ref().to_str().expect(PATH_UTF8_ERROR)).await
     }
 
+    #[allow(unused)]
     pub async fn query_by_path(
         conn: &mut SqliteConnection,
         path: String,
@@ -62,6 +63,7 @@ pub mod v1 {
         Ok(())
     }
 
+    #[allow(unused)]
     pub async fn mark_path<P: AsRef<Path>>(conn: &mut SqliteConnection, path: P) -> Result<()> {
         mark_path_str(conn, path.as_ref().to_str().expect(PATH_UTF8_ERROR)).await
     }

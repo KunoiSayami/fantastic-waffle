@@ -29,7 +29,7 @@ mod files {
         Ok(())
     }
 
-    pub async fn process_file(
+    async fn process_file(
         conn: &mut SqliteConnection,
         entry: async_walkdir::DirEntry,
     ) -> anyhow::Result<()> {
@@ -249,8 +249,7 @@ mod watcher {
     use log::{error, warn};
     use notify::{Event, EventKind, RecursiveMode, Watcher};
     use publib::types::ExitExt;
-    use publib::PATH_UTF8_ERROR;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread::JoinHandle;
@@ -266,7 +265,7 @@ mod watcher {
     impl FileWatcher {
         fn watcher<P: AsRef<Path>>(
             path: P,
-            config_path: String,
+            config_path: PathBuf,
             exit_signal: Arc<AtomicBool>,
             upstream: FileEventHelper,
         ) -> Result<(), notify::Error> {
@@ -301,23 +300,24 @@ mod watcher {
             Ok(())
         }
 
-        fn event_handler(event: Event, upstream: &FileEventHelper, configure: &str) {
+        fn event_handler(event: Event, upstream: &FileEventHelper, configure: &PathBuf) {
             if let EventKind::Modify(notify::event::ModifyKind::Data(
                 notify::event::DataChange::Any,
             )) = event.kind
             {
-                for file in event
-                    .paths
-                    .iter()
-                    .map(|x| x.to_str().expect(PATH_UTF8_ERROR))
-                {
+                for file in event.paths.iter() {
                     if configure.eq(file) {
                         tokio::runtime::Builder::new_multi_thread()
                             .enable_all()
                             .build()
                             .unwrap()
-                            .block_on(upstream.send_configure_updated(configure.to_string()))
+                            .block_on(
+                                upstream.send_configure_updated(
+                                    configure.to_str().unwrap().to_string(),
+                                ),
+                            )
                             .tap_none(|| warn!("Unable send event to file daemon"));
+                        break;
                     }
                 }
             }
@@ -337,7 +337,7 @@ mod watcher {
 
         pub fn start<P: AsRef<Path> + Send + 'static>(
             path: P,
-            config_path: String,
+            config_path: PathBuf,
             event_helper: FileEventHelper,
         ) -> Self {
             let signal = Arc::new(AtomicBool::new(false));
@@ -363,6 +363,6 @@ mod watcher {
     }
 }
 
-pub use files::{init_files, process_file, FileDaemon};
+pub use files::{init_files, FileDaemon};
 pub use types::FileEventHelper;
 pub use watcher::FileWatcher;

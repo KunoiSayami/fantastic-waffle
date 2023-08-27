@@ -1,5 +1,5 @@
 [package]
-name = "fantastic-waffle"
+name = "fantastic-waffle-server"
 version = "0.1.0"
 edition = "2021"
 
@@ -30,6 +30,7 @@ serde = "1.0.171"
 serde_derive = "1.0.171"
 serde_json = "1.0.103"
 sha2 = "0.10.7"
+shellexpand = "3.1.0"
 sqlx = { version = "0.7.1", features = ["runtime-tokio-rustls", "sqlite"] }
 tap = "1.0.1"
 tokio = { version = "1.29.1", features = ["full"] }

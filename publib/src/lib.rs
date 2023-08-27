@@ -18,6 +18,12 @@ pub fn check_penetration(path: &str) -> bool {
     }
 }
 
+pub fn append_current_path(path: &str) -> std::path::PathBuf {
+    let mut current_dir = std::env::current_dir().unwrap();
+    current_dir.push(path);
+    current_dir
+}
+
 #[cfg(test)]
 mod test {
     use crate::check_penetration;
@@ -27,5 +33,6 @@ mod test {
         assert_eq!(check_penetration("../"), false);
         assert_eq!(check_penetration("../publib/Cargo.toml"), true);
         assert_eq!(check_penetration("Cargo.toml"), true);
+        assert_eq!(check_penetration("../publib/src/lib.rs"), true);
     }
 }

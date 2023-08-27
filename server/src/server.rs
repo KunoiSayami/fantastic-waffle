@@ -7,7 +7,7 @@ pub mod v1 {
     use axum::body::StreamBody;
     use axum::extract::Path;
     use axum::response::IntoResponse;
-    use axum::{Extension, Json, Router};
+    use axum::{Extension, Router};
     use http::header::InvalidHeaderValue;
     use http::{HeaderMap, HeaderValue, Request};
     use hyper::Body;
@@ -158,6 +158,7 @@ mod types {
             Self::new(StatusCode::FORBIDDEN, None, reason)
         }
 
+        #[allow(unused)]
         pub fn forbidden_note(reason: &'static str) -> Self {
             Self::new(StatusCode::FORBIDDEN, None, Some(reason.to_string()))
         }
@@ -185,15 +186,13 @@ mod types {
                 reason,
             }
         }
+        #[allow(unused)]
         pub fn result(&self) -> &Option<Value> {
             &self.result
         }
+        #[allow(unused)]
         pub fn reason(&self) -> &Option<String> {
             &self.reason
-        }
-
-        pub fn into_value(self) -> serde_json::Result<Value> {
-            serde_json::to_value(self)
         }
     }
 
